@@ -248,9 +248,9 @@ app.get('/api/races/:id', async (req, res) => {
 // Static hosting (opzionale): se stai buildando il frontend (Vite) nella cartella dist
 // decommenta queste righe per servire i file statici dallo stesso server:
 //
-// const path = require('path');
-// app.use(express.static(path.join(__dirname, 'dist')));
-// app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
+const path = require('path');
+app.use(express.static(path.join(__dirname, 'dist')));
+app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 
 app.listen(PORT, () => {
   console.log(`✅ API server in ascolto su http://localhost:${PORT}`);
