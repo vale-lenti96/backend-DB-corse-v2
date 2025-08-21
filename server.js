@@ -251,6 +251,12 @@ app.get('/api/races/:id', async (req, res) => {
 const path = require('path');
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
+// Serve i file statici del frontend buildato
+app.use(express.static(path.join(__dirname, 'dist')));
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
 
 app.listen(PORT, () => {
   console.log(`✅ API server in ascolto su http://localhost:${PORT}`);
