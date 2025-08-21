@@ -249,12 +249,12 @@ app.get('/api/races/:id', async (req, res) => {
 // decommenta queste righe per servire i file statici dallo stesso server:
 //
 const path = require('path');
-app.use(express.static(path.join(__dirname, 'dist')));
-app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
+//app.use(express.static(path.join(__dirname, 'dist')));
+//app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 // Serve i file statici del frontend buildato
-app.use(express.static(path.join(__dirname, 'dist')));
-app.get('*', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+//app.use(express.static(path.join(__dirname, 'dist')));
+//app.get('*', (_req, res) => {
+//  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 
