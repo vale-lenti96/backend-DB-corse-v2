@@ -1,169 +1,258 @@
-import express from "express";
-import cors from "cors";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { parse as parseCsv } from "csv-parse/sync";
-import { Pool } from "pg";
+// server.js
+// Minimal API per collegare il frontend al DB Postgres su Render
+// Dipendenze: express, pg, cors
+// Avvio: node server.js (in prod), nodemon server.js (in dev)
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+
+const PORT = process.env.PORT || 3000;
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
+
+if (!DATABASE_URL) {
+  console.warn('⚠️  DATABASE_URL non impostata. Imposta una variabile d’ambiente DATABASE_URL con la tua connection string.');
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // Render Postgres richiede SSL
+});
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 
-const PORT = process.env.PORT || 8787;
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
-// ---------- UTIL ----------
-
-async function ensureSchema() {
-  const schemaSql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf-8");
-  await pool.query(schemaSql);
-}
-
-function toRow(obj) {
-  return {
-    race_name: obj.race_name,
-    race_url: obj.race_url || null,
-    date: obj.date,
-    location_city: obj.location_city || null,
-    location_country: obj.location_country || null,
-    region: obj.region || null,
-    distance_km: obj.distance_km ? parseFloat(obj.distance_km) : null,
-    race_type: obj.race_type || "road",
-    surface: obj.surface || "road",
-    elevation_gain_m: obj.elevation_gain_m ? parseInt(obj.elevation_gain_m) : null,
-    certified: String(obj.certified).toLowerCase() === "true",
-    typical_weather: obj.typical_weather || null,
-    nearest_airport: obj.nearest_airport || null,
-    registration_status: obj.registration_status || null,
-    registration_open_date: obj.registration_open_date || null,
-    registration_close_date: obj.registration_close_date || null,
-    registration_process: obj.registration_process || null,
-    fee_range_eur: obj.fee_range_eur || null,
-    geo_lat: obj.geo_lat ? parseFloat(obj.geo_lat) : null,
-    geo_lon: obj.geo_lon ? parseFloat(obj.geo_lon) : null,
-    sources: obj.sources_json || "[]",
-    tags: obj.tags_json || "[]"
-  };
-}
-
-async function seedFromCsv(csvRelativePath) {
-  const csvPath = path.join(__dirname, csvRelativePath);
-  if (!fs.existsSync(csvPath)) {
-    console.warn(`⚠️  CSV non trovato: ${csvPath} — salto il seed`);
-    return;
-  }
-
-  const content = fs.readFileSync(csvPath, "utf-8");
-  const records = parseCsv(content, { columns: true, skip_empty_lines: true });
-  const rows = records.map(toRow);
-
-  console.log(`🔁 Svuoto la tabella races…`);
-  await pool.query("TRUNCATE TABLE races;");
-
-  console.log(`⬆️ Importo ${rows.length} righe da ${csvRelativePath}…`);
-  const insert = `INSERT INTO races
-    (race_name, race_url, date, location_city, location_country, region, distance_km, race_type, surface,
-     elevation_gain_m, certified, typical_weather, nearest_airport, registration_status,
-     registration_open_date, registration_close_date, registration_process, fee_range_eur,
-     geo_lat, geo_lon, sources, tags)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`;
-
-  for (const r of rows) {
-    await pool.query(insert, [
-      r.race_name, r.race_url, r.date, r.location_city, r.location_country, r.region,
-      r.distance_km, r.race_type, r.surface, r.elevation_gain_m, r.certified,
-      r.typical_weather, r.nearest_airport, r.registration_status,
-      r.registration_open_date, r.registration_close_date, r.registration_process,
-      r.fee_range_eur, r.geo_lat, r.geo_lon, r.sources, r.tags
-    ]);
-  }
-  console.log(`✅ Seed completato.`);
-}
-
-// ---------- API ----------
-
-app.post("/api/search-races", async (req, res) => {
+// Healthcheck
+app.get('/api/health', async (_req, res) => {
   try {
-    const p = req.body || {};
-    if (!p.time_window?.from || !p.time_window?.to) {
-      return res.status(400).json({ error: "time_window.from e time_window.to sono obbligatori (YYYY-MM-DD)" });
-    }
-
-    const clauses = ["date >= $1 AND date <= $2"];
-    const params = [p.time_window.from, p.time_window.to];
-    let i = 3;
-
-    if (p.region)           { clauses.push(`region = $${i++}`);            params.push(p.region); }
-    if (p.country)          { clauses.push(`location_country = $${i++}`);  params.push(p.country); }
-    if (p.distance_km)      { clauses.push(`distance_km = $${i++}`);       params.push(Number(p.distance_km)); }
-    if (p.surface)          { clauses.push(`surface = $${i++}`);           params.push(p.surface); }
-
-    const sql = `
-      SELECT race_name, race_url, date, location_city, location_country, region, distance_km, surface,
-             elevation_gain_m, certified, typical_weather, nearest_airport, registration_status,
-             geo_lat, geo_lon, sources, tags
-      FROM races
-      WHERE ${clauses.join(" AND ")}
-      ORDER BY date ASC
-      LIMIT 5000
-    `;
-
-    const { rows } = await pool.query(sql, params);
-
-    const out = rows.map(r => ({
-      race_name: r.race_name,
-      race_url: r.race_url,
-      date: r.date,
-      location: r.location_city ? `${r.location_city}, ${r.location_country || ""}`.trim() : (r.location_country || ""),
-      country: r.location_country,
-      distance_km: r.distance_km,
-      course: {
-        surface: r.surface,
-        elevation_gain_m: r.elevation_gain_m,
-        certified: r.certified,
-        typical_weather: r.typical_weather
-      },
-      logistics: {
-        nearest_airport: r.nearest_airport,
-        registration_status: r.registration_status
-      },
-      sources: (() => { try { return JSON.parse(r.sources || "[]"); } catch { return []; } })(),
-      geo: (r.geo_lat && r.geo_lon) ? [Number(r.geo_lat), Number(r.geo_lon)] : null,
-      tags: (() => { try { return JSON.parse(r.tags || "[]"); } catch { return []; } })()
-    }));
-
-    res.json(out);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "search_failed", details: String(e) });
-  }
-});
-
-// ---------- BOOT ----------
-
-(async () => {
-  try {
-    await ensureSchema();
-
-    // Di default semina il DB ad ogni avvio. Metti SEED_ON_BOOT=0 per disattivare.
-    const shouldSeed = process.env.SEED_ON_BOOT !== "0";
-    if (shouldSeed) {
-      await seedFromCsv("races_template.csv");
-    } else {
-      console.log("⏭️  SEED_ON_BOOT=0 — seed disattivato.");
-    }
-
-    app.listen(PORT, () => {
-      console.log(`✅ Backend DB (Postgres) su :${PORT}`);
-    });
+    await pool.query('select 1');
+    res.json({ ok: true });
   } catch (err) {
-    console.error("❌ Errore in boot:", err);
-    process.exit(1);
+    res.status(500).json({ ok: false, error: err.message });
   }
-})();
+});
+
+/**
+ * Modello dati atteso dal frontend (tipi suggeriti in DB):
+ *  id (text/uuid), name (text), city (text), country (text),
+ *  date_start (date), date_end (date|null),
+ *  distances (text[])  -- es: {'5K','10K','21K','42K'}
+ *  surface (text)      -- 'road'|'trail'|'mixed'
+ *  elevation_profile (text) -- 'flat'|'rolling'|'hilly'
+ *  pb_friendly (boolean), price_from (numeric|null),
+ *  website (text|null), lat (numeric|null), lon (numeric|null)
+ *
+ * Indici consigliati:
+ *  - index on date_start
+ *  - gin index on distances
+ *  - btree on country, city, surface, elevation_profile
+ */
+
+// GET /api/races — ricerca con filtri + paginazione
+app.get('/api/races', async (req, res) => {
+  // Filtri dal querystring
+  const {
+    q,
+    distance,            // "5K" | "10K" | "21K" | "42K" (o lista "10K,21K")
+    country,             // "Italy" (substring case-insensitive)
+    surface,             // "road" | "trail" | "mixed" (o lista)
+    elevation,           // "flat" | "rolling" | "hilly" (o lista)
+    dateFrom,            // "YYYY-MM-DD"
+    dateTo,              // "YYYY-MM-DD"
+    page = '1',
+    limit = '60',
+    orderBy = 'date_start',   // opzionale, default: date_start
+    orderDir = 'asc',         // 'asc' | 'desc'
+  } = req.query;
+
+  const clauses = [];
+  const values = [];
+  let vi = 1;
+
+  // Ricerca full-text semplice su name, city, country
+  if (q) {
+    clauses.push(`(lower(name) like $${vi} or lower(city) like $${vi} or lower(country) like $${vi})`);
+    values.push(`%${String(q).toLowerCase()}%`);
+    vi++;
+  }
+
+  // Distanze: almeno una delle richieste deve comparire nell'array distances
+  if (distance) {
+    const list = String(distance).split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length === 1) {
+      clauses.push(`$${vi} = ANY(distances)`);
+      values.push(list[0]);
+      vi++;
+    } else if (list.length > 1) {
+      // ANY su OR multipli
+      const ors = list.map((_d, i) => `$${vi + i} = ANY(distances)`).join(' OR ');
+      clauses.push(`(${ors})`);
+      list.forEach(d => values.push(d));
+      vi += list.length;
+    }
+  }
+
+  if (country) {
+    clauses.push(`lower(country) like $${vi}`);
+    values.push(`%${String(country).toLowerCase()}%`);
+    vi++;
+  }
+
+  if (surface) {
+    const list = String(surface).split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length === 1) {
+      clauses.push(`surface = $${vi}`);
+      values.push(list[0]);
+      vi++;
+    } else if (list.length > 1) {
+      clauses.push(`surface = ANY($${vi})`);
+      values.push(list);
+      vi++;
+    }
+  }
+
+  if (elevation) {
+    const list = String(elevation).split(',').map(s => s.trim()).filter(Boolean);
+    if (list.length === 1) {
+      clauses.push(`elevation_profile = $${vi}`);
+      values.push(list[0]);
+      vi++;
+    } else if (list.length > 1) {
+      clauses.push(`elevation_profile = ANY($${vi})`);
+      values.push(list);
+      vi++;
+    }
+  }
+
+  if (dateFrom) {
+    clauses.push(`date_start >= $${vi}`);
+    values.push(dateFrom);
+    vi++;
+  }
+  if (dateTo) {
+    clauses.push(`date_start <= $${vi}`);
+    values.push(dateTo);
+    vi++;
+  }
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+  // Sanitizza order
+  const safeOrderCols = new Set(['date_start', 'country', 'city', 'name', 'price_from']);
+  const col = safeOrderCols.has(String(orderBy)) ? String(orderBy) : 'date_start';
+  const dir = String(orderDir).toLowerCase() === 'desc' ? 'desc' : 'asc';
+
+  // Paginazione
+  const p = Math.max(1, parseInt(page, 10) || 1);
+  const l = Math.max(1, Math.min(200, parseInt(limit, 10) || 60));
+  const offset = (p - 1) * l;
+
+  // Query count totale
+  const countSql = `SELECT COUNT(*)::int AS total FROM races ${where};`;
+
+  // Query page
+  const pageSql = `
+    SELECT
+      id, name, city, country,
+      to_char(date_start,'YYYY-MM-DD') AS date_start,
+      to_char(date_end,'YYYY-MM-DD')   AS date_end,
+      distances, surface, elevation_profile,
+      pb_friendly, price_from, website, lat, lon
+    FROM races
+    ${where}
+    ORDER BY ${col} ${dir} NULLS LAST
+    LIMIT ${l} OFFSET ${offset};
+  `;
+
+  try {
+    const client = await pool.connect();
+    try {
+      const [countRes, dataRes] = await Promise.all([
+        client.query(countSql, values),
+        client.query(pageSql, values),
+      ]);
+
+      const total = countRes.rows?.[0]?.total || 0;
+
+      const races = dataRes.rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        city: r.city,
+        country: r.country,
+        dateStart: r.date_start,
+        dateEnd: r.date_end || undefined,
+        distances: r.distances || [],
+        surface: r.surface,
+        elevationProfile: r.elevation_profile || undefined,
+        pbFriendly: r.pb_friendly === true,
+        priceFrom: r.price_from !== null ? Number(r.price_from) : undefined,
+        website: r.website || undefined,
+        lat: r.lat !== null ? Number(r.lat) : undefined,
+        lon: r.lon !== null ? Number(r.lon) : undefined,
+      }));
+
+      res.json({ races, total });
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('DB error:', err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+// GET /api/races/:id — dettaglio singola gara
+app.get('/api/races/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        id, name, city, country,
+        to_char(date_start,'YYYY-MM-DD') AS date_start,
+        to_char(date_end,'YYYY-MM-DD')   AS date_end,
+        distances, surface, elevation_profile,
+        pb_friendly, price_from, website, lat, lon
+      FROM races
+      WHERE id = $1
+      `,
+      [id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+
+    const r = rows[0];
+    const race = {
+      id: r.id,
+      name: r.name,
+      city: r.city,
+      country: r.country,
+      dateStart: r.date_start,
+      dateEnd: r.date_end || undefined,
+      distances: r.distances || [],
+      surface: r.surface,
+      elevationProfile: r.elevation_profile || undefined,
+      pbFriendly: r.pb_friendly === true,
+      priceFrom: r.price_from !== null ? Number(r.price_from) : undefined,
+      website: r.website || undefined,
+      lat: r.lat !== null ? Number(r.lat) : undefined,
+      lon: r.lon !== null ? Number(r.lon) : undefined,
+    };
+    res.json(race);
+  } catch (err) {
+    console.error('DB error:', err);
+    res.status(500).json({ error: 'Database error', detail: err.message });
+  }
+});
+
+// Static hosting (opzionale): se stai buildando il frontend (Vite) nella cartella dist
+// decommenta queste righe per servire i file statici dallo stesso server:
+//
+// const path = require('path');
+// app.use(express.static(path.join(__dirname, 'dist')));
+// app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
+
+app.listen(PORT, () => {
+  console.log(`✅ API server in ascolto su http://localhost:${PORT}`);
+});
+
