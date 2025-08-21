@@ -1,24 +1,18 @@
 {
-  "name": "runshift",
-  "private": true,
+  "name": "runshift-api",
   "version": "1.0.0",
+  "private": true,
   "type": "commonjs",
   "scripts": {
-    "dev:api": "nodemon server.js",
-    "start": "node server.js",
-    "build": "vite build",
-    "preview": "vite preview"
+    "start": "node server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "pg": "^8.11.5"
   },
-  "devDependencies": {
-    "vite": "^5.0.0",
-    "nodemon": "^3.0.2"
-  },
   "engines": {
-    "node": ">=20"
+    "node": "20.x"
   }
 }
+
