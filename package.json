@@ -1,8 +1,24 @@
 {
+  "name": "runshift",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
   "scripts": {
     "dev:api": "nodemon server.js",
     "start": "node server.js",
-    "build": "vite build",        // se hai il frontend Vite
-    "preview": "vite preview"     // opzionale
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
