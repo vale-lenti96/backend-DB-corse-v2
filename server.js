@@ -1,157 +1,104 @@
-// server.js
-// Minimal API per collegare il frontend al DB Postgres su Render
-// Dipendenze: express, pg, cors
-// Avvio: node server.js (in prod), nodemon server.js (in dev)
+// server.js — backend-only per Render
 
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 
-const PORT = process.env.PORT || 3000;
-const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
-
-if (!DATABASE_URL) {
-  console.warn('⚠️  DATABASE_URL non impostata. Imposta una variabile d’ambiente DATABASE_URL con la tua connection string.');
-}
-
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Render Postgres richiede SSL
-});
-
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Healthcheck
+// Log di sicurezza (maschera la password)
+function maskDbUrl(url) {
+  if (!url) return '';
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch { return '***'; }
+}
+
+const PORT = process.env.PORT || 3000;
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
+
+console.log('🔧 Node version:', process.version);
+console.log('🔌 PORT:', PORT);
+console.log('🗄️  DATABASE_URL set:', !!DATABASE_URL, DATABASE_URL ? '(' + maskDbUrl(DATABASE_URL) + ')' : '');
+
+let pool = null;
+if (!DATABASE_URL) {
+  console.warn('⚠️  DATABASE_URL non impostata: le API proveranno a funzionare ma le query falliranno.');
+} else {
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }, // richiesto su Render Postgres
+  });
+}
+
+// Healthcheck leggero (non crasha mai)
 app.get('/api/health', async (_req, res) => {
+  if (!pool) return res.json({ ok: false, db: false, error: 'DATABASE_URL missing' });
   try {
     await pool.query('select 1');
-    res.json({ ok: true });
+    res.json({ ok: true, db: true });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(503).json({ ok: false, db: false, error: err.message });
   }
 });
 
 /**
- * Modello dati atteso dal frontend (tipi suggeriti in DB):
- *  id (text/uuid), name (text), city (text), country (text),
- *  date_start (date), date_end (date|null),
- *  distances (text[])  -- es: {'5K','10K','21K','42K'}
- *  surface (text)      -- 'road'|'trail'|'mixed'
- *  elevation_profile (text) -- 'flat'|'rolling'|'hilly'
- *  pb_friendly (boolean), price_from (numeric|null),
- *  website (text|null), lat (numeric|null), lon (numeric|null)
- *
- * Indici consigliati:
- *  - index on date_start
- *  - gin index on distances
- *  - btree on country, city, surface, elevation_profile
+ * GET /api/races — filtri e paginazione
+ * Query: q, distance, country, surface, elevation, dateFrom, dateTo, page, limit, orderBy, orderDir
  */
-
-// GET /api/races — ricerca con filtri + paginazione
 app.get('/api/races', async (req, res) => {
-  // Filtri dal querystring
+  if (!pool) return res.status(500).json({ error: 'DB not configured (DATABASE_URL missing)' });
+
   const {
-    q,
-    distance,            // "5K" | "10K" | "21K" | "42K" (o lista "10K,21K")
-    country,             // "Italy" (substring case-insensitive)
-    surface,             // "road" | "trail" | "mixed" (o lista)
-    elevation,           // "flat" | "rolling" | "hilly" (o lista)
-    dateFrom,            // "YYYY-MM-DD"
-    dateTo,              // "YYYY-MM-DD"
-    page = '1',
-    limit = '60',
-    orderBy = 'date_start',   // opzionale, default: date_start
-    orderDir = 'asc',         // 'asc' | 'desc'
+    q, distance, country, surface, elevation, dateFrom, dateTo,
+    page = '1', limit = '60', orderBy = 'date_start', orderDir = 'asc',
   } = req.query;
 
   const clauses = [];
   const values = [];
   let vi = 1;
 
-  // Ricerca full-text semplice su name, city, country
   if (q) {
     clauses.push(`(lower(name) like $${vi} or lower(city) like $${vi} or lower(country) like $${vi})`);
-    values.push(`%${String(q).toLowerCase()}%`);
-    vi++;
+    values.push(`%${String(q).toLowerCase()}%`); vi++;
   }
-
-  // Distanze: almeno una delle richieste deve comparire nell'array distances
   if (distance) {
     const list = String(distance).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length === 1) {
-      clauses.push(`$${vi} = ANY(distances)`);
-      values.push(list[0]);
-      vi++;
-    } else if (list.length > 1) {
-      // ANY su OR multipli
+    if (list.length === 1) { clauses.push(`$${vi} = ANY(distances)`); values.push(list[0]); vi++; }
+    else if (list.length > 1) {
       const ors = list.map((_d, i) => `$${vi + i} = ANY(distances)`).join(' OR ');
-      clauses.push(`(${ors})`);
-      list.forEach(d => values.push(d));
-      vi += list.length;
+      clauses.push(`(${ors})`); list.forEach(d => values.push(d)); vi += list.length;
     }
   }
-
-  if (country) {
-    clauses.push(`lower(country) like $${vi}`);
-    values.push(`%${String(country).toLowerCase()}%`);
-    vi++;
-  }
-
+  if (country) { clauses.push(`lower(country) like $${vi}`); values.push(`%${String(country).toLowerCase()}%`); vi++; }
   if (surface) {
     const list = String(surface).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length === 1) {
-      clauses.push(`surface = $${vi}`);
-      values.push(list[0]);
-      vi++;
-    } else if (list.length > 1) {
-      clauses.push(`surface = ANY($${vi})`);
-      values.push(list);
-      vi++;
-    }
+    if (list.length === 1) { clauses.push(`surface = $${vi}`); values.push(list[0]); vi++; }
+    else if (list.length > 1) { clauses.push(`surface = ANY($${vi})`); values.push(list); vi++; }
   }
-
   if (elevation) {
     const list = String(elevation).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length === 1) {
-      clauses.push(`elevation_profile = $${vi}`);
-      values.push(list[0]);
-      vi++;
-    } else if (list.length > 1) {
-      clauses.push(`elevation_profile = ANY($${vi})`);
-      values.push(list);
-      vi++;
-    }
+    if (list.length === 1) { clauses.push(`elevation_profile = $${vi}`); values.push(list[0]); vi++; }
+    else if (list.length > 1) { clauses.push(`elevation_profile = ANY($${vi})`); values.push(list); vi++; }
   }
-
-  if (dateFrom) {
-    clauses.push(`date_start >= $${vi}`);
-    values.push(dateFrom);
-    vi++;
-  }
-  if (dateTo) {
-    clauses.push(`date_start <= $${vi}`);
-    values.push(dateTo);
-    vi++;
-  }
+  if (dateFrom) { clauses.push(`date_start >= $${vi}`); values.push(dateFrom); vi++; }
+  if (dateTo)   { clauses.push(`date_start <= $${vi}`); values.push(dateTo); vi++; }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-  // Sanitizza order
-  const safeOrderCols = new Set(['date_start', 'country', 'city', 'name', 'price_from']);
+  const safeOrderCols = new Set(['date_start','country','city','name','price_from']);
   const col = safeOrderCols.has(String(orderBy)) ? String(orderBy) : 'date_start';
   const dir = String(orderDir).toLowerCase() === 'desc' ? 'desc' : 'asc';
 
-  // Paginazione
   const p = Math.max(1, parseInt(page, 10) || 1);
   const l = Math.max(1, Math.min(200, parseInt(limit, 10) || 60));
   const offset = (p - 1) * l;
 
-  // Query count totale
   const countSql = `SELECT COUNT(*)::int AS total FROM races ${where};`;
-
-  // Query page
   const pageSql = `
     SELECT
       id, name, city, country,
@@ -172,9 +119,7 @@ app.get('/api/races', async (req, res) => {
         client.query(countSql, values),
         client.query(pageSql, values),
       ]);
-
       const total = countRes.rows?.[0]?.total || 0;
-
       const races = dataRes.rows.map(r => ({
         id: r.id,
         name: r.name,
@@ -191,73 +136,58 @@ app.get('/api/races', async (req, res) => {
         lat: r.lat !== null ? Number(r.lat) : undefined,
         lon: r.lon !== null ? Number(r.lon) : undefined,
       }));
-
       res.json({ races, total });
     } finally {
       client.release();
     }
   } catch (err) {
-    console.error('DB error:', err);
+    console.error('DB error on /api/races:', err.message);
     res.status(500).json({ error: 'Database error', detail: err.message });
   }
 });
 
-// GET /api/races/:id — dettaglio singola gara
+// Dettaglio
 app.get('/api/races/:id', async (req, res) => {
-  const { id } = req.params;
+  if (!pool) return res.status(500).json({ error: 'DB not configured (DATABASE_URL missing)' });
   try {
-    const { rows } = await pool.query(
-      `
+    const { rows } = await pool.query(`
       SELECT
         id, name, city, country,
         to_char(date_start,'YYYY-MM-DD') AS date_start,
         to_char(date_end,'YYYY-MM-DD')   AS date_end,
         distances, surface, elevation_profile,
         pb_friendly, price_from, website, lat, lon
-      FROM races
-      WHERE id = $1
-      `,
-      [id]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+      FROM races WHERE id = $1
+    `, [req.params.id]);
 
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     const r = rows[0];
-    const race = {
-      id: r.id,
-      name: r.name,
-      city: r.city,
-      country: r.country,
-      dateStart: r.date_start,
-      dateEnd: r.date_end || undefined,
-      distances: r.distances || [],
-      surface: r.surface,
+    res.json({
+      id: r.id, name: r.name, city: r.city, country: r.country,
+      dateStart: r.date_start, dateEnd: r.date_end || undefined,
+      distances: r.distances || [], surface: r.surface,
       elevationProfile: r.elevation_profile || undefined,
       pbFriendly: r.pb_friendly === true,
       priceFrom: r.price_from !== null ? Number(r.price_from) : undefined,
       website: r.website || undefined,
       lat: r.lat !== null ? Number(r.lat) : undefined,
       lon: r.lon !== null ? Number(r.lon) : undefined,
-    };
-    res.json(race);
+    });
   } catch (err) {
-    console.error('DB error:', err);
+    console.error('DB error on /api/races/:id:', err.message);
     res.status(500).json({ error: 'Database error', detail: err.message });
   }
 });
 
-// Static hosting (opzionale): se stai buildando il frontend (Vite) nella cartella dist
-// decommenta queste righe per servire i file statici dallo stesso server:
-//
-const path = require('path');
-//app.use(express.static(path.join(__dirname, 'dist')));
-//app.get('*', (_req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
-// Serve i file statici del frontend buildato
-//app.use(express.static(path.join(__dirname, 'dist')));
-//app.get('*', (_req, res) => {
-//  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+// Handler errori non catturati (evita crash “status 1”)
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
 });
 
-
+// Avvio server SEMPRE (anche se il DB non risponde al primo colpo)
 app.listen(PORT, () => {
   console.log(`✅ API server in ascolto su http://localhost:${PORT}`);
 });
