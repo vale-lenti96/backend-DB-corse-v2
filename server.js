@@ -15,9 +15,13 @@ const PORT = process.env.PORT || 3001;
 const DEFAULT_DB =
   "postgresql://db_gare_corsa_user:5jvC8S3ryZloq884tVtK36m0N6TK0ZHd@dpg-d2iueebuibrs73aa9qh0-a.frankfurt-postgres.render.com/db_gare_corsa?sslmode=require";
 
+// --- Pool PG con timeouts “sani”
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL || DEFAULT_DB,
   ssl: { rejectUnauthorized: false },
+  max: parseInt(process.env.PG_POOL_MAX || "8", 10),
+  idleTimeoutMillis: parseInt(process.env.PG_IDLE_TIMEOUT || "30000", 10),
+  connectionTimeoutMillis: parseInt(process.env.PG_CONN_TIMEOUT || "5000", 10),
 });
 
 // middleware
@@ -48,6 +52,21 @@ app.get("/", (_req, res) => {
     .type("text/plain")
     .send("Runshift API is up. Health at /health, races at /api/races");
 });
+// /health: velocissimo, non tocca il DB (usalo su Render)
+app.get("/health", (_req, res) => {
+  res.status(200).json({ ok: true, uptime: process.uptime() });
+});
+
+// /ready: verifica DB (usalo tu per check manuale)
+app.get("/ready", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.status(200).json({ ok: true, db: true });
+  } catch (e) {
+    res.status(503).json({ ok: false, db: false, error: e.message });
+  }
+});
+
 
 // ---- utils ----
 function toInt(val, def) {
@@ -196,6 +215,14 @@ if (hasDist) {
 }
 
 // start
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`API server running on http://localhost:${PORT}`);
+  // Warm-up: prova a connetterti al DB una volta all'avvio
+  try {
+    await pool.query("SELECT 1");
+    console.log("DB warm-up: OK");
+  } catch (e) {
+    console.warn("DB warm-up failed:", e.message);
+  }
 });
+
