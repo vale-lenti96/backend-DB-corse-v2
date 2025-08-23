@@ -123,11 +123,11 @@ app.get("/api/races", async (req, res) => {
   const to = normDate(toDate);
   if (from) {
     p.push(from);
-    where.push(`NULLIF(date,'')::timestamp >= $${p.length}`);
+    where.push(date_ts >= $N);
   }
   if (to) {
     p.push(to);
-    where.push(`NULLIF(date,'')::timestamp <= $${p.length}`);
+    where.push(date_ts >= $N);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
