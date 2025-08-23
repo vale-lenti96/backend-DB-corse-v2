@@ -127,7 +127,7 @@ app.get("/api/races", async (req, res) => {
   }
   if (to) {
     p.push(to);
-    where.push(date_ts >= $N);
+    where.push(date_ts <= $N);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
