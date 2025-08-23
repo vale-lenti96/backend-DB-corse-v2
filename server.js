@@ -151,7 +151,7 @@ app.get("/api/races", async (req, res) => {
       sources_json, tags_json
     FROM public.races_full
     ${whereSql}
-    ORDER BY NULLIF(date,'')::timestamp NULLS LAST, race_name ASC
+    ORDER BY date_ts NULLS LAST, race_name ASC
     LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
