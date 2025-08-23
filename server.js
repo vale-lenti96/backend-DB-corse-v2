@@ -1,194 +1,247 @@
-// server.js — backend-only per Render
+// server.js
+// Backend API per Runshift - PostgreSQL (Render) + Express
 
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const { Pool } = require("pg");
 
 const app = express();
-app.use(cors());
+
+// ---------- Config ----------
+const PORT = process.env.PORT || 3001;
+
+// Usa DATABASE_URL da Render; come fallback usa la connessione che mi hai dato
+const DEFAULT_DB =
+  "postgresql://db_gare_corsa_user:5jvC8S3ryZloq884tVtK36m0N6TK0ZHd@dpg-d2iueebuibrs73aa9qh0-a.frankfurt-postgres.render.com/db_gare_corsa?sslmode=require";
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || DEFAULT_DB,
+  ssl: { rejectUnauthorized: false },
+});
+
+// ---------- Middleware ----------
+app.use(cors()); // Se vuoi restringere: cors({ origin: ["https://TUO-FRONTEND"] })
 app.use(express.json());
 
-// Log di sicurezza (maschera la password)
-function maskDbUrl(url) {
-  if (!url) return '';
-  try {
-    const u = new URL(url);
-    if (u.password) u.password = '***';
-    return u.toString();
-  } catch { return '***'; }
+// Prova a servire la SPA se esiste una build in ./dist (non obbligatoria)
+const distPath = path.join(__dirname, "dist");
+app.use((req, res, next) => {
+  // Solo se esiste la cartella dist
+  if (req.method === "GET") {
+    // evitiamo errori se la dir non esiste su Render
+    try {
+      require("fs").accessSync(distPath);
+      app.use(express.static(distPath));
+    } catch (_) { /* no dist folder; ignore */ }
+  }
+  next();
+});
+
+// ---------- Utils ----------
+function toInt(val, fallback) {
+  const n = parseInt(val, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-const PORT = process.env.PORT || 3000;
-const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
-
-console.log('🔧 Node version:', process.version);
-console.log('🔌 PORT:', PORT);
-console.log('🗄️  DATABASE_URL set:', !!DATABASE_URL, DATABASE_URL ? '(' + maskDbUrl(DATABASE_URL) + ')' : '');
-
-let pool = null;
-if (!DATABASE_URL) {
-  console.warn('⚠️  DATABASE_URL non impostata: le API proveranno a funzionare ma le query falliranno.');
-} else {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false }, // richiesto su Render Postgres
-  });
+function likeParam(s) {
+  if (!s || typeof s !== "string") return null;
+  return `%${s.trim()}%`;
 }
 
-// Healthcheck leggero (non crasha mai)
-app.get('/api/health', async (_req, res) => {
-  if (!pool) return res.json({ ok: false, db: false, error: 'DATABASE_URL missing' });
+function normalizeDate(s) {
+  // accetta ISO o YYYY-MM-DD; lascia null se vuoto
+  if (!s || typeof s !== "string") return null;
+  const t = s.trim();
+  if (!t) return null;
+  return t;
+}
+
+// ---------- Health ----------
+app.get("/health", async (req, res) => {
   try {
-    await pool.query('select 1');
+    await pool.query("SELECT 1");
     res.json({ ok: true, db: true });
-  } catch (err) {
-    res.status(503).json({ ok: false, db: false, error: err.message });
+  } catch (e) {
+    res.status(500).json({ ok: false, db: false, error: e.message });
   }
 });
 
+// ---------- GET /api/races (lista con filtri + pagination) ----------
 /**
- * GET /api/races — filtri e paginazione
- * Query: q, distance, country, surface, elevation, dateFrom, dateTo, page, limit, orderBy, orderDir
+ * Query params supportati:
+ * - country: string (ILIKE)
+ * - city: string (ILIKE)
+ * - distance: string (match di testo su distance_km, es. "42" o "21.1")
+ * - q: string (cerca su race_name e location)
+ * - fromDate, toDate: string (ISO o YYYY-MM-DD)
+ * - page: 1-based (default 1)
+ * - limit: default 24
  */
-app.get('/api/races', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'DB not configured (DATABASE_URL missing)' });
-
+app.get("/api/races", async (req, res) => {
   const {
-    q, distance, country, surface, elevation, dateFrom, dateTo,
-    page = '1', limit = '60', orderBy = 'date_start', orderDir = 'asc',
+    country,
+    city,
+    distance,
+    q,
+    fromDate,
+    toDate,
+    page = "1",
+    limit = "24",
   } = req.query;
 
-  const clauses = [];
-  const values = [];
-  let vi = 1;
+  const p = [];
+  const where = [];
 
-  if (q) {
-    clauses.push(`(lower(name) like $${vi} or lower(city) like $${vi} or lower(country) like $${vi})`);
-    values.push(`%${String(q).toLowerCase()}%`); vi++;
+  // Filtri testuali
+  if (country) {
+    p.push(likeParam(country));
+    where.push(`location_country ILIKE $${p.length}`);
+  }
+  if (city) {
+    p.push(likeParam(city));
+    where.push(`location_city ILIKE $${p.length}`);
   }
   if (distance) {
-    const list = String(distance).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length === 1) { clauses.push(`$${vi} = ANY(distances)`); values.push(list[0]); vi++; }
-    else if (list.length > 1) {
-      const ors = list.map((_d, i) => `$${vi + i} = ANY(distances)`).join(' OR ');
-      clauses.push(`(${ors})`); list.forEach(d => values.push(d)); vi += list.length;
-    }
+    // distance_km è stringa tipo "42 / 21.1 / 10" → contains
+    p.push(likeParam(distance));
+    where.push(`distance_km ILIKE $${p.length}`);
   }
-  if (country) { clauses.push(`lower(country) like $${vi}`); values.push(`%${String(country).toLowerCase()}%`); vi++; }
-  if (surface) {
-    const list = String(surface).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length === 1) { clauses.push(`surface = $${vi}`); values.push(list[0]); vi++; }
-    else if (list.length > 1) { clauses.push(`surface = ANY($${vi})`); values.push(list); vi++; }
+  if (q) {
+    const like = likeParam(q);
+    p.push(like, like, like);
+    where.push(
+      `(race_name ILIKE $${p.length - 2} OR location_city ILIKE $${p.length - 1} OR location_country ILIKE $${p.length})`
+    );
   }
-  if (elevation) {
-    const list = String(elevation).split(',').map(s => s.trim()).filter(Boolean);
-    if (list.length === 1) { clauses.push(`elevation_profile = $${vi}`); values.push(list[0]); vi++; }
-    else if (list.length > 1) { clauses.push(`elevation_profile = ANY($${vi})`); values.push(list); vi++; }
+
+  // Filtri data: la colonna "date" è TEXT; interpretiamo in SQL dove possibile
+  const from = normalizeDate(fromDate);
+  const to = normalizeDate(toDate);
+  if (from) {
+    p.push(from);
+    where.push(`NULLIF(date,'')::timestamp >= $${p.length}`);
   }
-  if (dateFrom) { clauses.push(`date_start >= $${vi}`); values.push(dateFrom); vi++; }
-  if (dateTo)   { clauses.push(`date_start <= $${vi}`); values.push(dateTo); vi++; }
+  if (to) {
+    p.push(to);
+    where.push(`NULLIF(date,'')::timestamp <= $${p.length}`);
+  }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const safeOrderCols = new Set(['date_start','country','city','name','price_from']);
-  const col = safeOrderCols.has(String(orderBy)) ? String(orderBy) : 'date_start';
-  const dir = String(orderDir).toLowerCase() === 'desc' ? 'desc' : 'asc';
+  // Paginazione
+  const lim = Math.min(Math.max(toInt(limit, 24), 1), 100);
+  const pgNum = Math.max(toInt(page, 1), 1);
+  const offset = (pgNum - 1) * lim;
 
-  const p = Math.max(1, parseInt(page, 10) || 1);
-  const l = Math.max(1, Math.min(200, parseInt(limit, 10) || 60));
-  const offset = (p - 1) * l;
+  p.push(lim);
+  const limitIdx = p.length;
+  p.push(offset);
+  const offsetIdx = p.length;
 
-  const countSql = `SELECT COUNT(*)::int AS total FROM races ${where};`;
-  const pageSql = `
+  const baseSelect = `
     SELECT
-      id, name, city, country,
-      to_char(date_start,'YYYY-MM-DD') AS date_start,
-      to_char(date_end,'YYYY-MM-DD')   AS date_end,
-      distances, surface, elevation_profile,
-      pb_friendly, price_from, website, lat, lon
-    FROM races
-    ${where}
-    ORDER BY ${col} ${dir} NULLS LAST
-    LIMIT ${l} OFFSET ${offset};
+      race_name, race_url, date, location_city, location_country, region,
+      distance_km, race_type, surface, elevation_gain_m, certified,
+      typical_weather, nearest_airport, registration_status,
+      registration_open_date, registration_close_date, registration_process,
+      fee_range_eur, geo_lat, geo_lon, image_url, image_thumb_url,
+      sources_json, tags_json
+    FROM public.races_full
+    ${whereSql}
+    ORDER BY
+      NULLIF(date,'')::timestamp NULLS LAST,
+      race_name ASC
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
+  `;
+
+  const countSql = `
+    SELECT COUNT(*)::int AS total
+    FROM public.races_full
+    ${whereSql}
   `;
 
   try {
-    const client = await pool.connect();
-    try {
-      const [countRes, dataRes] = await Promise.all([
-        client.query(countSql, values),
-        client.query(pageSql, values),
-      ]);
-      const total = countRes.rows?.[0]?.total || 0;
-      const races = dataRes.rows.map(r => ({
-        id: r.id,
-        name: r.name,
-        city: r.city,
-        country: r.country,
-        dateStart: r.date_start,
-        dateEnd: r.date_end || undefined,
-        distances: r.distances || [],
-        surface: r.surface,
-        elevationProfile: r.elevation_profile || undefined,
-        pbFriendly: r.pb_friendly === true,
-        priceFrom: r.price_from !== null ? Number(r.price_from) : undefined,
-        website: r.website || undefined,
-        lat: r.lat !== null ? Number(r.lat) : undefined,
-        lon: r.lon !== null ? Number(r.lon) : undefined,
-      }));
-      res.json({ races, total });
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    console.error('DB error on /api/races:', err.message);
-    res.status(500).json({ error: 'Database error', detail: err.message });
+    const [rowsQ, countQ] = await Promise.all([
+      pool.query(baseSelect, p),
+      pool.query(countSql, p.slice(0, p.length - 2)), // count non usa limit/offset
+    ]);
+
+    res.json({
+      page: pgNum,
+      limit: lim,
+      total: countQ.rows?.[0]?.total ?? 0,
+      items: rowsQ.rows,
+    });
+  } catch (e) {
+    console.error("GET /api/races error:", e);
+    res.status(500).json({ error: "DB error", detail: e.message });
   }
 });
 
-// Dettaglio
-app.get('/api/races/:id', async (req, res) => {
-  if (!pool) return res.status(500).json({ error: 'DB not configured (DATABASE_URL missing)' });
+// ---------- GET /api/race (singola gara per URL) ----------
+/**
+ * Recupera una gara tramite il suo race_url passato come query param:
+ *   /api/race?url=https://worldsmarathons.com/it/marathon/ultraswim-333-greece
+ *
+ * (evita problemi di slash nei path dinamici)
+ */
+app.get("/api/race", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: "Missing url" });
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT
+        race_name, race_url, date, location_city, location_country, region,
+        distance_km, race_type, surface, elevation_gain_m, certified,
+        typical_weather, nearest_airport, registration_status,
+        registration_open_date, registration_close_date, registration_process,
+        fee_range_eur, geo_lat, geo_lon, image_url, image_thumb_url,
+        sources_json, tags_json
+      FROM public.races_full
+      WHERE race_url = $1
+      LIMIT 1
+      `,
+      [url]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("GET /api/race error:", e);
+    res.status(500).json({ error: "DB error", detail: e.message });
+  }
+});
+
+// ---------- (Opzionale) Stats di base ----------
+app.get("/api/stats", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT
-        id, name, city, country,
-        to_char(date_start,'YYYY-MM-DD') AS date_start,
-        to_char(date_end,'YYYY-MM-DD')   AS date_end,
-        distances, surface, elevation_profile,
-        pb_friendly, price_from, website, lat, lon
-      FROM races WHERE id = $1
-    `, [req.params.id]);
-
-    if (!rows.length) return res.status(404).json({ error: 'Not found' });
-    const r = rows[0];
-    res.json({
-      id: r.id, name: r.name, city: r.city, country: r.country,
-      dateStart: r.date_start, dateEnd: r.date_end || undefined,
-      distances: r.distances || [], surface: r.surface,
-      elevationProfile: r.elevation_profile || undefined,
-      pbFriendly: r.pb_friendly === true,
-      priceFrom: r.price_from !== null ? Number(r.price_from) : undefined,
-      website: r.website || undefined,
-      lat: r.lat !== null ? Number(r.lat) : undefined,
-      lon: r.lon !== null ? Number(r.lon) : undefined,
-    });
-  } catch (err) {
-    console.error('DB error on /api/races/:id:', err.message);
-    res.status(500).json({ error: 'Database error', detail: err.message });
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE NULLIF(date,'') IS NOT NULL)::int AS with_date,
+        COUNT(*) FILTER (WHERE COALESCE(image_thumb_url, image_url) IS NOT NULL)::int AS with_image
+      FROM public.races_full
+    `);
+    res.json(rows[0] || { total: 0, with_date: 0, with_image: 0 });
+  } catch (e) {
+    res.status(500).json({ error: "DB error", detail: e.message });
   }
 });
 
-// Handler errori non catturati (evita crash “status 1”)
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason);
-});
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
+// ---------- SPA fallback (se esiste dist) ----------
+app.get("*", (req, res, next) => {
+  try {
+    const indexPath = path.join(distPath, "index.html");
+    require("fs").accessSync(indexPath);
+    return res.sendFile(indexPath);
+  } catch (_) {
+    return next(); // nessuna SPA build; ignora
+  }
 });
 
-// Avvio server SEMPRE (anche se il DB non risponde al primo colpo)
+// ---------- Avvio ----------
 app.listen(PORT, () => {
-  console.log(`✅ API server in ascolto su http://localhost:${PORT}`);
+  console.log(`API server running on http://localhost:${PORT}`);
 });
-
