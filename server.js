@@ -1,6 +1,15 @@
 // server.js – Runshift API (Render)
 
 // deps
+const cors = require('cors');
+app.use(cors({
+  origin: true, // oppure "https://TUO-DOMINIO-RENDER-FRONTEND"
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: false
+}));
+app.options('*', cors());
+
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
