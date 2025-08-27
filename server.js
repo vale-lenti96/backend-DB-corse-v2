@@ -2,14 +2,6 @@
 
 // deps
 const cors = require('cors');
-app.use(cors({
-  origin: true, // oppure "https://TUO-DOMINIO-RENDER-FRONTEND"
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
-  credentials: false
-}));
-app.options('*', cors());
-
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
@@ -33,7 +25,13 @@ const pool = new Pool({
 });
 
 // middleware
-app.use(cors());
+app.use(cors({
+  origin: true, // oppure "https://TUO-DOMINIO-RENDER-FRONTEND"
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: false
+}));
+app.options('*', cors());
 app.use(express.json());
 
 // ---- static SPA (se esiste ./dist) ----
