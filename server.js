@@ -100,6 +100,26 @@ app.get('/api/races', async (req, res) => {
       p.push(toDate);
       where.push(`date_ts <= $${p.length}::date`);
     }
+    
+    // ====== /api/countries (distinct paesi da oggi in poi) ======
+app.get('/api/countries', async (_req, res) => {
+  try {
+    const sql = `
+      SELECT DISTINCT location_country AS country
+      FROM ${TABLE}
+      WHERE location_country IS NOT NULL
+        AND location_country <> ''
+        AND date_ts >= CURRENT_DATE
+      ORDER BY 1
+    `;
+    const { rows } = await pool.query(sql);
+    res.json(rows.map(r => r.country));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Database error', detail: e.message });
+  }
+});
+
 
     const pageNum = toInt(page, 1);
     const limitNum = Math.min(toInt(limit, 24), 100);
